@@ -1,0 +1,165 @@
+esphome:
+  name: hvac
+  platform: ESP8266
+  board: nodemcuv2
+
+wifi:
+  ssid: "xxxxx"
+  password: "xxxxxxxx"
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Hvac Fallback Hotspot"
+    password: "xxxxx"
+
+captive_portal:
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  password: "xxxxx"
+
+ota:
+  password: "xxxxx"
+
+sensor:
+  - platform: dht
+    pin: D5
+    model: AM2302
+    temperature:
+      name: "HVAC Temp"
+      id: hvac_temp
+    humidity:
+      name: "HVAC Humidity"
+      id: hvac_humid
+    update_interval: 30s
+    
+  - platform: template
+    name: "Target Temp"
+    id: set_point
+    
+  - platform: wifi_signal
+    name:  "WiFi Strength @ hvac"
+    update_interval: 60s
+
+switch:
+  - platform: gpio
+    name: "Heating"
+    pin: D8
+    id: heat
+    
+  - platform: template
+    name: "Temp Up"
+    id: tempup
+    turn_on_action:
+      - lambda: |-
+          id(target) = id(target) + 1;
+          id(set_point).publish_state(id(target));
+          id(tempup).publish_state(false);
+          
+  - platform: template
+    name: "Temp Down"
+    id: tempdown
+    turn_on_action:
+      - lambda: |-
+          id(target) = id(target) - 1;
+          id(set_point).publish_state(id(target));
+          id(tempdown).publish_state(false);
+          
+  - platform: template
+    name: "Away"
+    id: away
+    turn_on_action:
+      - lambda: |-
+          id(gone) = true;
+          id(away).publish_state(true);
+          
+    turn_off_action:
+      - lambda: |-
+          id(gone) = false;             
+          id(away).publish_state(false);
+
+globals:
+  - id: target
+    type: int
+    restore_value: no
+    initial_value: '60'
+  - id: gone
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+time:
+  - platform: homeassistant
+    id: mytime
+    
+  - platform: sntp
+    # schedule
+    on_time:
+      # Cron syntax, hour 11pm-4am (except Jun-Aug) Night Setback
+      - cron: '* 00 0-4,23 * 1-5,9-12 *'
+        then:
+          lambda: |-
+           id(target) = 62;
+           id(set_point).publish_state(id(target));
+      # Cron syntax, 7AM/7PM (except Jun-Aug) Morning/Evening Warmup
+      - cron: '* 00 7-8,19-21 * 1-5,9-12 *'
+        then:
+          lambda: |-
+           id(target) = 68;
+           id(set_point).publish_state(id(target));
+      # Cron syntax, 9AM-5PM (except Jun-Aug) Midday Temp
+      - cron: '* 00 9-16 * 1-5,9-12 *'
+        then:
+          lambda: |-
+           id(target) = 65;
+           id(set_point).publish_state(id(target));
+      # Cron syntax, EveryHour (Summer Heat Not)
+      - cron: '* 00 * * 6-8 *'
+        then:
+          lambda: |-
+           id(target) = 50;
+           id(set_point).publish_state(id(target));
+   
+font:
+  - file: 'arial.ttf'
+    id: font1
+    size: 10
+  - file: 'arial.ttf'
+    id: font2
+    size: 16
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  scan: False
+
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    reset_pin: GPIO16
+    address: 0x3c
+    update_interval: 10s
+    lambda: |-
+      float degf = (id(hvac_temp).state * 1.8) + 32;
+      // Print Target Temperature
+      it.printf(20, 0, id(font1), TextAlign::TOP_LEFT, "Target Temp:  %d", id(target));
+      // Print "TEMP" in center.
+      it.printf(64, 18, id(font2), TextAlign::TOP_CENTER,"%.1f", degf);
+      // Print Humidity ...
+      it.printf(25, 40, id(font1), TextAlign::TOP_LEFT, "Humidity");
+      it.printf(75, 40, id(font1), TextAlign::TOP_LEFT,"%.1f", id(hvac_humid).state);
+      // Print time in HH:MM format
+      it.printf(30, 50, id(font1), TextAlign::TOP_LEFT, "Time");
+      it.strftime(70, 50, id(font1), TextAlign::TOP_LEFT, "%H:%M", id(mytime).now());
+      //
+      // Temp control and differentials
+      if (degf > (id(target)- 0.1)) id(heat).turn_off();
+      if ((degf < (id(target)- 0.4)) & (id(gone) == false)) id(heat).turn_on();
+      //
+      //else id(heat).turn_off(); Adding this to above line cause excessive cycling
+      //If Away (gone=true) relay doesnt get triggered for heat and we fallback to
+      //reliable honeywell which is now our low limit temp setting
